@@ -1,6 +1,3 @@
-# To run this code, run command:
-# python main.py 3 English
-
 import argparse
 import requests
 import openai
@@ -61,10 +58,6 @@ def translate_text(text, target_language):
 def export_to_pdf(translated_content, output_file):
     pdf = FPDF()
     script_dir = os.path.dirname(os.path.realpath(__file__))
-    roboto_font = os.path.join(script_dir, "Roboto-Regular.ttf")
-    roboto_bold_font = os.path.join(script_dir, "Roboto-Bold.ttf")
-    pdf.add_font("Roboto", style="", fname=roboto_font, uni=True)
-    pdf.add_font("Roboto", style="B", fname=roboto_bold_font, uni=True)
     pdf.add_page()
     pdf.set_font("Roboto", size=12)
     pdf.multi_cell(0, 10, translated_content)

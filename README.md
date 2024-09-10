@@ -42,12 +42,12 @@ python main.py 3 English
 This will save the translated articles as PDF files in the project directory.
 
 ## Dependencies
-Python 3.x
-requests
-beautifulsoup4
-openai
-FPDF
-argparse
+- Python 3.x
+- requests
+- beautifulsoup4
+- openai
+- FPDF
+- argparse
 
 # API Key Setup
 Make sure to replace the openai.api_key in the main.py file with your own OpenAI API key.
