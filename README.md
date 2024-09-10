@@ -49,5 +49,5 @@ This will save the translated articles as PDF files in the project directory.
 - FPDF
 - argparse
 
-# API Key Setup
+## API Key Setup
 Make sure to replace the openai.api_key in the main.py file with your own OpenAI API key.
