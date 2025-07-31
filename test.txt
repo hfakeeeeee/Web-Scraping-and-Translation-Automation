@@ -1,83 +1,199 @@
-import static org.mockito.Mockito.*;
+package com.example.service;
+
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.util.concurrent.TimeUnit;
 
 import org.junit.jupiter.api.*;
+import org.mockito.MockedStatic;
 import org.springframework.http.HttpStatus;
+
+import com.example.api.ResponseAPI;
+import com.example.exception.DhpAutomationTestException;
 
 class CodeValidatorServiceImplTest {
 
-  private CodeValidatorServiceImpl svc;
-  private CodeValidatorServiceImpl spySvc;
+    private CodeValidatorServiceImpl svc;
 
-  @BeforeEach
-  void init() {
-    svc    = new CodeValidatorServiceImpl();
-    spySvc = spy(svc);
-  }
+    @BeforeEach
+    void setUp() {
+        svc = spy(new CodeValidatorServiceImpl());
+    }
 
-  @Test
-  void success() {
-    // stub helpers
-    doNothing().when(spySvc).writeCodeToFile(anyString());
-    doReturn("").when(spySvc).runCheckSyntax();
-    doNothing().when(spySvc).deleteValidateFile();
+    //--- writeCodeToFile ----------------------------------------------------
 
-    ResponseAPI resp = spySvc.validateCode("whatever");
-    assertEquals("Code is valid", resp.getData());
-  }
+    @Test
+    void writeCodeToFile_success() throws Exception {
+        try (MockedStatic<Files> files = mockStatic(Files.class)) {
+            // no exception thrown
+            svc.writeCodeToFile("hello");
+            files.verify(() ->
+                Files.write(Paths.get("playwright/main.py"), "hello".getBytes())
+            );
+        }
+    }
 
-  @Test
-  void syntaxError() {
-    doNothing().when(spySvc).writeCodeToFile(anyString());
-    doReturn("E:1 undefined\n").when(spySvc).runCheckSyntax();
+    @Test
+    void writeCodeToFile_ioException() throws Exception {
+        try (MockedStatic<Files> files = mockStatic(Files.class)) {
+            files.when(() ->
+                Files.write(any(), any(byte[].class))
+            ).thenThrow(new IOException("disk full"));
 
-    DhpAutomationTestException ex = assertThrows(
-      DhpAutomationTestException.class,
-      () -> spySvc.validateCode("bad")
-    );
-    assertEquals(HttpStatus.BAD_REQUEST, ex.getStatus());
-    assertTrue(ex.getMessage().contains("undefined"));
-  }
+            DhpAutomationTestException ex = assertThrows(
+                DhpAutomationTestException.class,
+                () -> svc.writeCodeToFile("x")
+            );
+            assertEquals(HttpStatus.INTERNAL_SERVER_ERROR, ex.getStatus());
+            assertEquals("Unable to write code file", ex.getMessage());
+        }
+    }
 
-  @Test
-  void writeFails() {
-    doThrow(new DhpAutomationTestException("Unable to write code file",
-                                          HttpStatus.INTERNAL_SERVER_ERROR))
-      .when(spySvc).writeCodeToFile(anyString());
+    //--- deleteValidateFile -------------------------------------------------
 
-    DhpAutomationTestException ex = assertThrows(
-      DhpAutomationTestException.class,
-      () -> spySvc.validateCode("x")
-    );
-    assertEquals("Unable to write code file", ex.getMessage());
-  }
+    @Test
+    void deleteValidateFile_success() throws Exception {
+        try (MockedStatic<Files> files = mockStatic(Files.class)) {
+            // pretend it deletes
+            svc.deleteValidateFile();
+            files.verify(() ->
+                Files.deleteIfExists(Paths.get("playwright/main.py"))
+            );
+        }
+    }
 
-  @Test
-  void deleteFails() {
-    doNothing().when(spySvc).writeCodeToFile(anyString());
-    doReturn("").when(spySvc).runCheckSyntax();
-    doThrow(new DhpAutomationTestException("Unable to delete code file",
-                                          HttpStatus.INTERNAL_SERVER_ERROR))
-      .when(spySvc).deleteValidateFile();
+    @Test
+    void deleteValidateFile_ioException() throws Exception {
+        try (MockedStatic<Files> files = mockStatic(Files.class)) {
+            files.when(() ->
+                Files.deleteIfExists(any())
+            ).thenThrow(new IOException("no perms"));
 
-    DhpAutomationTestException ex = assertThrows(
-      DhpAutomationTestException.class,
-      () -> spySvc.validateCode("x")
-    );
-    assertEquals("Unable to delete code file", ex.getMessage());
-  }
+            DhpAutomationTestException ex = assertThrows(
+                DhpAutomationTestException.class,
+                () -> svc.deleteValidateFile()
+            );
+            assertEquals(HttpStatus.INTERNAL_SERVER_ERROR, ex.getStatus());
+            assertEquals("Unable to delete code file", ex.getMessage());
+        }
+    }
 
-  @Test
-  void syntaxCheckException() {
-    doNothing().when(spySvc).writeCodeToFile(anyString());
-    doThrow(new DhpAutomationTestException("Having issue while validating code",
-                                          HttpStatus.INTERNAL_SERVER_ERROR))
-      .when(spySvc).runCheckSyntax();
+    //--- runCheckSyntax -----------------------------------------------------
 
-    DhpAutomationTestException ex = assertThrows(
-      DhpAutomationTestException.class,
-      () -> spySvc.validateCode("x")
-    );
-    assertEquals("Having issue while validating code", ex.getMessage());
-  }
+    @Test
+    void runCheckSyntax_noErrors() throws Exception {
+        // prepare a fake process & builder
+        Process mockProc = mock(Process.class);
+        ProcessBuilder mockPb = mock(ProcessBuilder.class);
+
+        // stub our factory hook
+        doReturn(mockPb).when(svc).newProcessBuilder();
+
+        when(mockPb.directory(any())).thenReturn(mockPb);
+        when(mockPb.redirectErrorStream(true)).thenReturn(mockPb);
+        when(mockPb.command(anyVararg())).thenReturn(mockPb);
+        when(mockPb.start()).thenReturn(mockProc);
+
+        when(mockProc.waitFor(1, TimeUnit.MINUTES)).thenReturn(true);
+        // empty output → success
+        when(mockProc.getInputStream())
+            .thenReturn(new ByteArrayInputStream(new byte[0]));
+
+        String out = svc.runCheckSyntax();
+        assertEquals("", out);
+    }
+
+    @Test
+    void runCheckSyntax_withErrors() throws Exception {
+        Process mockProc = mock(Process.class);
+        ProcessBuilder mockPb = mock(ProcessBuilder.class);
+        doReturn(mockPb).when(svc).newProcessBuilder();
+
+        when(mockPb.directory(any())).thenReturn(mockPb);
+        when(mockPb.redirectErrorStream(true)).thenReturn(mockPb);
+        when(mockPb.command(anyVararg())).thenReturn(mockPb);
+        when(mockPb.start()).thenReturn(mockProc);
+
+        when(mockProc.waitFor(1, TimeUnit.MINUTES)).thenReturn(true);
+        String err = "E:1 undefined name 'x'\n";
+        when(mockProc.getInputStream())
+            .thenReturn(new ByteArrayInputStream(err.getBytes()));
+
+        String out = svc.runCheckSyntax();
+        assertTrue(out.contains("undefined name"));
+    }
+
+    @Test
+    void runCheckSyntax_startIOException() throws Exception {
+        ProcessBuilder mockPb = mock(ProcessBuilder.class);
+        doReturn(mockPb).when(svc).newProcessBuilder();
+        when(mockPb.directory(any())).thenReturn(mockPb);
+        when(mockPb.redirectErrorStream(true)).thenReturn(mockPb);
+        when(mockPb.command(anyVararg())).thenReturn(mockPb);
+        when(mockPb.start()).thenThrow(new IOException("no exec"));
+
+        DhpAutomationTestException ex = assertThrows(
+            DhpAutomationTestException.class,
+            () -> svc.runCheckSyntax()
+        );
+        assertEquals(HttpStatus.INTERNAL_SERVER_ERROR, ex.getStatus());
+        assertEquals("Having issue while validating code", ex.getMessage());
+    }
+
+    @Test
+    void runCheckSyntax_waitInterrupted() throws Exception {
+        Process mockProc = mock(Process.class);
+        ProcessBuilder mockPb = mock(ProcessBuilder.class);
+        doReturn(mockPb).when(svc).newProcessBuilder();
+
+        when(mockPb.directory(any())).thenReturn(mockPb);
+        when(mockPb.redirectErrorStream(true)).thenReturn(mockPb);
+        when(mockPb.command(anyVararg())).thenReturn(mockPb);
+        when(mockPb.start()).thenReturn(mockProc);
+
+        doThrow(new InterruptedException("oops"))
+            .when(mockProc).waitFor(1, TimeUnit.MINUTES);
+
+        DhpAutomationTestException ex = assertThrows(
+            DhpAutomationTestException.class,
+            () -> svc.runCheckSyntax()
+        );
+        assertEquals(HttpStatus.INTERNAL_SERVER_ERROR, ex.getStatus());
+        assertEquals("Having issue while validating code", ex.getMessage());
+    }
+
+    @Test
+    void runCheckSyntax_readOutputIOException() throws Exception {
+        // simulate a broken InputStream
+        InputStream bad = new InputStream() {
+            @Override
+            public int read() throws IOException {
+                throw new IOException("boom");
+            }
+        };
+
+        Process mockProc = mock(Process.class);
+        ProcessBuilder mockPb = mock(ProcessBuilder.class);
+        doReturn(mockPb).when(svc).newProcessBuilder();
+
+        when(mockPb.directory(any())).thenReturn(mockPb);
+        when(mockPb.redirectErrorStream(true)).thenReturn(mockPb);
+        when(mockPb.command(anyVararg())).thenReturn(mockPb);
+        when(mockPb.start()).thenReturn(mockProc);
+        when(mockProc.waitFor(1, TimeUnit.MINUTES)).thenReturn(true);
+        when(mockProc.getInputStream()).thenReturn(bad);
+
+        DhpAutomationTestException ex = assertThrows(
+            DhpAutomationTestException.class,
+            () -> svc.runCheckSyntax()
+        );
+        assertEquals(HttpStatus.INTERNAL_SERVER_ERROR, ex.getStatus());
+        assertEquals("Unable to read output", ex.getMessage());
+    }
 }
