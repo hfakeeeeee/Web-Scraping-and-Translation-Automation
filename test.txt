@@ -2,129 +2,76 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
-import java.io.ByteArrayInputStream;
+import java.io.File;
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Paths;
-import java.util.concurrent.TimeUnit;
+import java.io.InputStream;
 
+import org.apache.commons.io.FileUtils;
+import org.apache.pulsar.client.api.Authentication;
+import org.apache.pulsar.client.api.AuthenticationFactory;
+import org.apache.pulsar.client.api.PulsarClient;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.springframework.http.HttpStatus;
+
+import com.humana.dhp.automation.test.agent.service.impl.ClientServiceImpl;
+import com.humana.dhp.automation.test.agent.service.intf.ClientService;
+import com.humana.dhp.eventbus.client.Client;
+import com.humana.dhp.eventbus.common.ClientConfiguration;
 
 @ExtendWith(MockitoExtension.class)
-class CodeValidatorServiceImplTest {
-
-    private final CodeValidatorServiceImpl service = new CodeValidatorServiceImpl();
+class ClientServiceImplTest {
 
     @Test
-    void validateCode_success() throws Exception {
-        // Arrange: static Files + ProcessBuilder mocking
-        try (MockedStatic<Files> files = mockStatic(Files.class);
-             MockedConstruction<ProcessBuilder> pbc = mockConstruction(ProcessBuilder.class,
-                 (pbMock, ctx) -> {
-                     // chain directory, redirectErrorStream, command
-                     when(pbMock.directory(any())).thenReturn(pbMock);
-                     when(pbMock.redirectErrorStream(true)).thenReturn(pbMock);
-                     when(pbMock.command(anyString(), anyString(), anyString())).thenReturn(pbMock);
+    void constructor_success_and_getPulsarClient() throws Exception {
+        try (
+            MockedStatic<FileUtils> fileUtils = mockStatic(FileUtils.class);
+            MockedStatic<AuthenticationFactory> authFactory = mockStatic(AuthenticationFactory.class);
+            MockedConstruction<Client> clientCtor = mockConstruction(Client.class,
+                (mockClient, ctx) -> {
+                    PulsarClient pcMock = mock(PulsarClient.class);
+                    when(mockClient.getPulsarClient()).thenReturn(pcMock);
+                })
+        ) {
+            fileUtils.when(() -> FileUtils.copyInputStreamToFile(any(InputStream.class), any(File.class)))
+                     .thenAnswer(inv -> null);
 
-                     // fake process
-                     Process proc = mock(Process.class);
-                     when(pbMock.start()).thenReturn(proc);
-                     when(proc.waitFor(1, TimeUnit.MINUTES)).thenReturn(true);
-                     // empty output → valid code
-                     when(proc.getInputStream())
-                         .thenReturn(new ByteArrayInputStream("".getBytes()));
-                 })) {
+            Authentication authMock = mock(Authentication.class);
+            authFactory.when(() -> AuthenticationFactory.token("my-token"))
+                       .thenReturn(authMock);
 
-            // write & delete succeed
-            files.when(() -> Files.write(any(), any())).thenReturn(Paths.get("dummy"));
-            files.when(() -> Files.deleteIfExists(any())).thenReturn(true);
+            ClientServiceImpl svc = new ClientServiceImpl("my-token", "pulsar://localhost:6650");
 
-            // Act
-            ResponseAPI resp = service.validateCode("print('hi')");
+            assertEquals(1, clientCtor.constructed().size());
+            Object[] args = clientCtor.constructed().get(0).arguments();
+            assertEquals("pulsar://localhost:6650", args[0]);
+            assertSame(authMock, args[1]);
+            assertTrue(args[2] instanceof File);
+            assertEquals("cert.crt", ((File) args[2]).getName());
+            assertTrue(args[3] instanceof ClientConfiguration);
 
-            // Assert
-            assertNotNull(resp);
-            assertEquals("Code is valid", resp.getData());
+            ClientService cs = svc;
+            PulsarClient returned = cs.getPulsarClient();
+            assertNotNull(returned);
         }
     }
 
     @Test
-    void validateCode_syntaxError() throws Exception {
-        try (MockedStatic<Files> files = mockStatic(Files.class);
-             MockedConstruction<ProcessBuilder> pbc = mockConstruction(ProcessBuilder.class,
-                 (pbMock, ctx) -> {
-                     when(pbMock.directory(any())).thenReturn(pbMock);
-                     when(pbMock.redirectErrorStream(true)).thenReturn(pbMock);
-                     when(pbMock.command(anyString(), anyString(), anyString())).thenReturn(pbMock);
+    void constructor_copyFails_throwsIOException() {
+        try (MockedStatic<FileUtils> fileUtils = mockStatic(FileUtils.class)) {
+            fileUtils.when(() -> FileUtils.copyInputStreamToFile(any(InputStream.class), any(File.class)))
+                     .thenThrow(new IOException("disk full"));
 
-                     Process proc = mock(Process.class);
-                     when(pbMock.start()).thenReturn(proc);
-                     when(proc.waitFor(1, TimeUnit.MINUTES)).thenReturn(true);
-                     // non-empty output → simulate lint error
-                     when(proc.getInputStream())
-                         .thenReturn(new ByteArrayInputStream("Syntax error".getBytes()));
-                 })) {
-
-            files.when(() -> Files.write(any(), any())).thenReturn(Paths.get("dummy"));
-
-            // Act & Assert
-            DhpAutomationTestException ex = assertThrows(
-                DhpAutomationTestException.class,
-                () -> service.validateCode("bad code")
-            );
-            assertEquals(HttpStatus.BAD_REQUEST, ex.getStatus());
-            assertTrue(ex.getMessage().contains("Syntax error"));
+            assertThrows(IOException.class,
+                () -> new ClientServiceImpl("token", "url"));
         }
     }
 
     @Test
-    void validateCode_writeIOException() {
-        try (MockedStatic<Files> files = mockStatic(Files.class)) {
-            // write fails immediately
-            files.when(() -> Files.write(any(), any()))
-                 .thenThrow(new IOException("disk full"));
-
-            DhpAutomationTestException ex = assertThrows(
-                DhpAutomationTestException.class,
-                () -> service.validateCode("irrelevant")
-            );
-            assertEquals(HttpStatus.INTERNAL_SERVER_ERROR, ex.getStatus());
-            assertTrue(ex.getMessage().contains("Unable to write code file"));
-        }
-    }
-
-    @Test
-    void validateCode_deleteIOException() throws Exception {
-        try (MockedStatic<Files> files = mockStatic(Files.class);
-             MockedConstruction<ProcessBuilder> pbc = mockConstruction(ProcessBuilder.class,
-                 (pbMock, ctx) -> {
-                     when(pbMock.directory(any())).thenReturn(pbMock);
-                     when(pbMock.redirectErrorStream(true)).thenReturn(pbMock);
-                     when(pbMock.command(anyString(), anyString(), anyString())).thenReturn(pbMock);
-
-                     Process proc = mock(Process.class);
-                     when(pbMock.start()).thenReturn(proc);
-                     when(proc.waitFor(1, TimeUnit.MINUTES)).thenReturn(true);
-                     when(proc.getInputStream())
-                         .thenReturn(new ByteArrayInputStream("".getBytes()));
-                 })) {
-
-            files.when(() -> Files.write(any(), any())).thenReturn(Paths.get("dummy"));
-            // deletion fails after syntax passes
-            files.when(() -> Files.deleteIfExists(any()))
-                 .thenThrow(new IOException("delete locked"));
-
-            DhpAutomationTestException ex = assertThrows(
-                DhpAutomationTestException.class,
-                () -> service.validateCode("print('ok')")
-            );
-            assertEquals(HttpStatus.INTERNAL_SERVER_ERROR, ex.getStatus());
-            assertTrue(ex.getMessage().contains("Unable to delete code file"));
-        }
+    void constructor_missingResource_throwsNullPointerException() {
+        assertThrows(NullPointerException.class,
+            () -> new ClientServiceImpl("token", "url"));
     }
 }
