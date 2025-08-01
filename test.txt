@@ -5,6 +5,7 @@ import static org.mockito.Mockito.*;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.lang.reflect.Constructor;
 
 import org.apache.commons.io.FileUtils;
 import org.apache.pulsar.client.api.Authentication;
@@ -24,25 +25,32 @@ import com.humana.dhp.eventbus.common.ClientConfiguration;
 @ExtendWith(MockitoExtension.class)
 class ClientServiceImplTest {
 
+    private ClientServiceImpl newViaReflection(String token, String url) throws Exception {
+        Constructor<ClientServiceImpl> ctor =
+            ClientServiceImpl.class.getDeclaredConstructor(String.class, String.class);
+        ctor.setAccessible(true);
+        return ctor.newInstance(token, url);
+    }
+
     @Test
     void constructor_success_and_getPulsarClient() throws Exception {
         try (
             MockedStatic<FileUtils> fileUtils = mockStatic(FileUtils.class);
             MockedStatic<AuthenticationFactory> authFactory = mockStatic(AuthenticationFactory.class);
-            MockedConstruction<Client> clientCtor = mockConstruction(Client.class,
-                (mockClient, ctx) -> {
-                    PulsarClient pcMock = mock(PulsarClient.class);
-                    when(mockClient.getPulsarClient()).thenReturn(pcMock);
-                })
+            MockedConstruction<Client> clientCtor = mockConstruction(Client.class, (mockClient, ctx) -> {
+                PulsarClient pcMock = mock(PulsarClient.class);
+                when(mockClient.getPulsarClient()).thenReturn(pcMock);
+            })
         ) {
-            fileUtils.when(() -> FileUtils.copyInputStreamToFile(any(InputStream.class), any(File.class)))
-                     .thenAnswer(inv -> null);
+            fileUtils.when(() ->
+                FileUtils.copyInputStreamToFile(any(InputStream.class), any(File.class))
+            ).thenAnswer(inv -> null);
 
             Authentication authMock = mock(Authentication.class);
             authFactory.when(() -> AuthenticationFactory.token("my-token"))
                        .thenReturn(authMock);
 
-            ClientServiceImpl svc = new ClientServiceImpl("my-token", "pulsar://localhost:6650");
+            ClientServiceImpl svc = newViaReflection("my-token", "pulsar://localhost:6650");
 
             assertEquals(1, clientCtor.constructed().size());
             Object[] args = clientCtor.constructed().get(0).arguments();
@@ -59,19 +67,26 @@ class ClientServiceImplTest {
     }
 
     @Test
-    void constructor_copyFails_throwsIOException() {
+    void constructor_copyFails_throwsIOException() throws Exception {
         try (MockedStatic<FileUtils> fileUtils = mockStatic(FileUtils.class)) {
-            fileUtils.when(() -> FileUtils.copyInputStreamToFile(any(InputStream.class), any(File.class)))
-                     .thenThrow(new IOException("disk full"));
+            fileUtils.when(() ->
+                FileUtils.copyInputStreamToFile(any(InputStream.class), any(File.class))
+            ).thenThrow(new IOException("disk full"));
 
             assertThrows(IOException.class,
-                () -> new ClientServiceImpl("token", "url"));
+                () -> newViaReflection("token", "url"));
         }
     }
 
     @Test
     void constructor_missingResource_throwsNullPointerException() {
         assertThrows(NullPointerException.class,
-            () -> new ClientServiceImpl("token", "url"));
+            () -> {
+                try {
+                    newViaReflection("token","url");
+                } catch (Exception e) {
+                    throw e.getCause() != null ? e.getCause() : e;
+                }
+            });
     }
 }
