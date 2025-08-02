@@ -1,92 +1,54 @@
 import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 
 import java.io.File;
 import java.io.IOException;
-import java.io.InputStream;
-import java.lang.reflect.Constructor;
+import java.nio.file.Files;
 
 import org.apache.commons.io.FileUtils;
-import org.apache.pulsar.client.api.Authentication;
-import org.apache.pulsar.client.api.AuthenticationFactory;
-import org.apache.pulsar.client.api.PulsarClient;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
-import org.mockito.junit.jupiter.MockitoExtension;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import com.humana.dhp.automation.test.agent.service.impl.ClientServiceImpl;
-import com.humana.dhp.automation.test.agent.service.intf.ClientService;
-import com.humana.dhp.eventbus.client.Client;
-import com.humana.dhp.eventbus.common.ClientConfiguration;
+class FileUtilExceptionPathTest {
 
-@ExtendWith(MockitoExtension.class)
-class ClientServiceImplTest {
-
-    private ClientServiceImpl newViaReflection(String token, String url) throws Exception {
-        Constructor<ClientServiceImpl> ctor =
-            ClientServiceImpl.class.getDeclaredConstructor(String.class, String.class);
-        ctor.setAccessible(true);
-        return ctor.newInstance(token, url);
-    }
+    // Bạn có thể dùng một logger test-captor để verify log.error được gọi,
+    // nhưng nếu chỉ cần cover line thì chỉ cần gọi method mà không throw.
 
     @Test
-    void constructor_success_and_getPulsarClient() throws Exception {
-        try (
-            MockedStatic<FileUtils> fileUtils = mockStatic(FileUtils.class);
-            MockedStatic<AuthenticationFactory> authFactory = mockStatic(AuthenticationFactory.class);
-            MockedConstruction<Client> clientCtor = mockConstruction(Client.class, (mockClient, ctx) -> {
-                PulsarClient pcMock = mock(PulsarClient.class);
-                when(mockClient.getPulsarClient()).thenReturn(pcMock);
-            })
-        ) {
-            fileUtils.when(() ->
-                FileUtils.copyInputStreamToFile(any(InputStream.class), any(File.class))
-            ).thenAnswer(inv -> null);
+    void cleanupDirectory_whenCleanThrowsIOException_shouldCatchAndNotThrow() throws IOException {
+        // Tạo temp dir
+        File tempDir = Files.createTempDirectory("test-ex").toFile();
+        // Mock static FileUtils.cleanDirectory to throw
+        try (MockedStatic<FileUtils> mocked = mockStatic(FileUtils.class)) {
+            mocked.when(() -> FileUtils.cleanDirectory(any(File.class)))
+                  .thenThrow(new IOException("mocked failure"));
 
-            Authentication authMock = mock(Authentication.class);
-            authFactory.when(() -> AuthenticationFactory.token("my-token"))
-                       .thenReturn(authMock);
+            // Không nên throw ra exception
+            assertDoesNotThrow(() -> FileUtil.cleanupDirectory(tempDir.getAbsolutePath()));
 
-            ClientServiceImpl svc = newViaReflection("my-token", "pulsar://localhost:6650");
-
-            assertEquals(1, clientCtor.constructed().size());
-            Object[] args = clientCtor.constructed().get(0).arguments();
-            assertEquals("pulsar://localhost:6650", args[0]);
-            assertSame(authMock, args[1]);
-            assertTrue(args[2] instanceof File);
-            assertEquals("cert.crt", ((File) args[2]).getName());
-            assertTrue(args[3] instanceof ClientConfiguration);
-
-            ClientService cs = svc;
-            PulsarClient returned = cs.getPulsarClient();
-            assertNotNull(returned);
+            // Verify cleanDirectory có được gọi
+            mocked.verify(() -> FileUtils.cleanDirectory(tempDir), times(1));
+        } finally {
+            tempDir.delete();
         }
     }
 
     @Test
-    void constructor_copyFails_throwsIOException() throws Exception {
-        try (MockedStatic<FileUtils> fileUtils = mockStatic(FileUtils.class)) {
-            fileUtils.when(() ->
-                FileUtils.copyInputStreamToFile(any(InputStream.class), any(File.class))
-            ).thenThrow(new IOException("disk full"));
+    void cleanupFile_whenForceDeleteOnExitThrowsIOException_shouldCatchAndNotThrow() throws IOException {
+        // Tạo temp file
+        File tempFile = Files.createTempFile("test-ex-file", ".txt").toFile();
+        try (MockedStatic<FileUtils> mocked = mockStatic(FileUtils.class)) {
+            mocked.when(() -> FileUtils.forceDeleteOnExit(any(File.class)))
+                  .thenThrow(new IOException("mocked failure"));
 
-            assertThrows(IOException.class,
-                () -> newViaReflection("token", "url"));
+            assertDoesNotThrow(() -> FileUtil.cleanupFile(tempFile.getAbsolutePath()));
+
+            mocked.verify(() -> FileUtils.forceDeleteOnExit(tempFile), times(1));
+        } finally {
+            tempFile.delete();
         }
-    }
-
-    @Test
-    void constructor_missingResource_throwsNullPointerException() {
-        assertThrows(NullPointerException.class,
-            () -> {
-                try {
-                    newViaReflection("token","url");
-                } catch (Exception e) {
-                    throw e.getCause() != null ? e.getCause() : e;
-                }
-            });
     }
 }
