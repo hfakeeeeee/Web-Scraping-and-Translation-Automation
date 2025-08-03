@@ -1,101 +1,145 @@
-import com.azure.core.http.rest.Response;
-import com.azure.storage.file.share.ShareClient;
-import com.azure.storage.file.share.ShareDirectoryClient;
-import com.azure.storage.file.share.ShareFileClient;
-import com.azure.storage.file.share.models.ShareFileUploadInfo;
+package com.humana.dhp.automation.test.agent.service.impl;
+
+import com.humana.dha.dhp.repomanagement.RepositoryManager;
+import com.humana.dhp.automation.test.agent.configs.DefaultConfig;
+import com.humana.dhp.automation.test.agent.enums.Status;
+import com.humana.dhp.automation.test.agent.enums.Language;
+import com.humana.dhp.automation.test.agent.model.dto.ExecuteCommandDTO;
+import com.humana.dhp.automation.test.agent.model.dto.RunDetailDTO;
+import com.humana.dhp.automation.test.agent.model.dto.VersionControlDTO;
+import com.humana.dhp.automation.test.agent.model.dto.update.UpdateRunDetailDTO;
+import com.humana.dhp.automation.test.agent.service.intf.CollectService;
+import com.humana.dhp.automation.test.agent.service.intf.LogsService;
+import com.humana.dhp.automation.test.agent.service.intf.TerminalProcess;
+import com.humana.dhp.automation.test.agent.service.intf.UpdateRequestService;
+import com.humana.dhp.automation.test.agent.strategy.platform.TestPlatformStrategy;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
-import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.*;
+import reactor.core.publisher.Flux;
 
 import java.io.File;
-import java.nio.file.Files;
+import java.util.*;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
-class ShareClientServiceImplTest {
+class TestServiceImplTest {
 
-    @Mock
-    private ShareClient shareClient;
-    @Mock
-    private ShareDirectoryClient rootDirectoryClient;
-    @Mock
-    private ShareDirectoryClient subDir1;
-    @Mock
-    private ShareDirectoryClient subDir2;
-    @Mock
-    private ShareFileClient fileClient;
-    @Mock
-    private Response<ShareFileUploadInfo> response;
+    @Mock DefaultConfig defaultConfig;
+    @Mock TestPlatformStrategy testPlatformStrategy;
+    @Mock UpdateRequestService updateRequestService;
+    @Mock TerminalProcess terminalProcess;
+    @Mock CollectService collectService;
+    @Mock LogsService logsService;
 
-    private ShareClientServiceImpl service;
+    @InjectMocks TestServiceImpl service;
 
     @BeforeEach
-    void setUp() {
-        service = new ShareClientServiceImpl(shareClient);
-        when(shareClient.getRootDirectoryClient()).thenReturn(rootDirectoryClient);
+    void setup() {
+        when(defaultConfig.getHostName()).thenReturn("host-agent");
+        when(defaultConfig.getTestPlatformStrategy()).thenReturn(testPlatformStrategy);
     }
 
     @Test
-    void uploadFileToAzureFileShare_success(@TempDir File tempDir) throws Exception {
-        File tempFile = new File(tempDir, "test.txt");
-        Files.writeString(tempFile.toPath(), "hello");
+    void runTest_normalTest_whenRunDetailIsNull_reportsFailure() {
+        when(updateRequestService.getRequest(eq("u1"), eq(RunDetailDTO.class))).thenReturn(null);
 
-        String path = "dir1/dir2/file.txt";
-        when(shareClient.getFileClient(path)).thenReturn(fileClient);
+        service.runTest("normal_test/u1");
 
-        when(rootDirectoryClient.getSubdirectoryClient("dir1")).thenReturn(subDir1);
-        when(subDir1.exists()).thenReturn(false);
-        when(subDir1.getSubdirectoryClient("dir2")).thenReturn(subDir2);
-        when(subDir2.exists()).thenReturn(false);
-
-        doNothing().when(subDir1).create();
-        doNothing().when(subDir2).create();
-        doNothing().when(fileClient).create(tempFile.length());
-        when(fileClient.uploadRangeWithResponse(any(), any(), isNull())).thenReturn(response);
-
-        boolean result = service.uploadFileToAzureFileShare(tempFile, path);
-
-        assertTrue(result);
-        verify(fileClient, never()).deleteIfExists();
+        ArgumentCaptor<UpdateRunDetailDTO> captor = ArgumentCaptor.forClass(UpdateRunDetailDTO.class);
+        verify(updateRequestService, times(1)).updateRequest(eq("u1"), captor.capture());
+        UpdateRunDetailDTO dto = captor.getValue();
+        assertEquals(Status.FAILED, dto.getStatus());
+        assertTrue(dto.getErrorMessage().contains("Unable to get run detail"));
+        verify(terminalProcess).cleanUpTest();
+        verify(terminalProcess).closeProcess();
+        verify(logsService).end();
     }
 
     @Test
-    void uploadFileToAzureFileShare_nonExistentFile() {
-        File nonexistent = new File("does_not_exist.txt");
-        String path = "any/path.txt";
-        when(shareClient.getFileClient(path)).thenReturn(fileClient);
+    void runTest_normalTest_whenCanceled_doesNothingExceptCleanup() {
+        RunDetailDTO rd = new RunDetailDTO();
+        rd.setStatus(Status.CANCELED);
+        when(updateRequestService.getRequest(eq("u2"), eq(RunDetailDTO.class))).thenReturn(rd);
 
-        boolean result = service.uploadFileToAzureFileShare(nonexistent, path);
+        service.runTest("normal_test/u2");
 
-        assertFalse(result);
-        verify(fileClient, times(1)).deleteIfExists();
+        verify(updateRequestService, never()).updateRequest(eq("u2"), any());
+        verify(terminalProcess).cleanUpTest();
+        verify(terminalProcess).closeProcess();
+        verify(logsService).end();
     }
 
     @Test
-    void uploadFileToAzureFileShare_retryFailure(@TempDir File tempDir) throws Exception {
-        File tempFile = new File(tempDir, "test2.txt");
-        Files.writeString(tempFile.toPath(), "data");
+    void runTest_normalTest_successfulFlow_reportsInProgressAndFinal() {
+        RunDetailDTO rd = new RunDetailDTO();
+        rd.setStatus(null);
+        rd.setLanguage(Language.JAVA);
+        rd.setVariables(new HashMap<>());
+        rd.setSetupCommand(null);
+        when(updateRequestService.getRequest(eq("u3"), eq(RunDetailDTO.class))).thenReturn(rd);
+        when(testPlatformStrategy.getWorkingDirectory(rd)).thenReturn(new File("."));
+        when(testPlatformStrategy.buildRunTestCommand(rd)).thenReturn("run-cmd");
+        ExecuteCommandDTO exec = mock(ExecuteCommandDTO.class);
+        when(exec.getExitCode()).thenReturn(0);
+        when(exec.getErrorMessage()).thenReturn(null);
+        when(exec.getMessage()).thenReturn("OK");
+        when(terminalProcess.executeTest(eq(Language.JAVA), any(File.class), eq("run-cmd"), anyMap()))
+            .thenReturn(exec);
 
-        String path = "dir1/dir2/file2.txt";
-        when(shareClient.getFileClient(path)).thenReturn(fileClient);
+        service.runTest("normal_test/u3");
 
-        when(rootDirectoryClient.getSubdirectoryClient("dir1")).thenReturn(subDir1);
-        when(subDir1.exists()).thenReturn(false);
-        when(subDir1.getSubdirectoryClient("dir2")).thenReturn(subDir2);
-        when(subDir2.exists()).thenReturn(false);
+        ArgumentCaptor<UpdateRunDetailDTO> captor = ArgumentCaptor.forClass(UpdateRunDetailDTO.class);
+        verify(updateRequestService, times(2)).updateRequest(eq("u3"), captor.capture());
+        List<UpdateRunDetailDTO> calls = captor.getAllValues();
+        assertEquals(Status.IN_PROGRESS, calls.get(0).getStatus());
+        assertEquals("host-agent", calls.get(0).getAgent());
+        assertEquals("host-agent", calls.get(1).getAgent());
+        verify(collectService).collectTestReportAndRecords(any(UpdateRunDetailDTO.class), eq(rd));
+        verify(terminalProcess).cleanUpTest();
+        verify(terminalProcess).closeProcess();
+        verify(logsService).end();
+    }
 
-        doNothing().when(subDir1).create();
-        doNothing().when(subDir2).create();
-        doNothing().when(fileClient).create(tempFile.length());
-        when(fileClient.uploadRangeWithResponse(any(), any(), isNull())).thenReturn(null);
+    @Test
+    void runTest_repoTest_whenVersionControlIsNull_reportsFailure() {
+        when(updateRequestService.getRequest(eq("u4"), eq(VersionControlDTO.class))).thenReturn(null);
 
-        boolean result = service.uploadFileToAzureFileShare(tempFile, path);
+        service.runTest("repo_test/u4");
 
-        assertFalse(result);
-        verify(fileClient, times(1)).deleteIfExists();
+        ArgumentCaptor<UpdateRunDetailDTO> captor = ArgumentCaptor.forClass(UpdateRunDetailDTO.class);
+        verify(updateRequestService, times(1)).updateRequest(eq("u4"), captor.capture());
+        assertEquals(Status.FAILED, captor.getValue().getStatus());
+        verify(terminalProcess).cleanUpTest();
+        verify(terminalProcess).closeProcess();
+        verify(logsService).end();
+    }
+
+    @Test
+    void runTest_invalidType_justCleansUp() {
+        service.runTest("unknown/u5");
+        verify(updateRequestService, never()).getRequest(anyString(), any());
+        verify(updateRequestService, never()).updateRequest(anyString(), any());
+        verify(terminalProcess).cleanUpTest();
+        verify(terminalProcess).closeProcess();
+        verify(logsService).end();
+    }
+
+    @Test
+    void getLogs_escapesNewlines() {
+        when(logsService.getFlux()).thenReturn(Flux.just("one\nline", "two"));
+        List<String> out = service.getLogs().collectList().block();
+        assertEquals(List.of("one\\nline", "two"), out);
+    }
+
+    @Test
+    void cancelTest_stopsTerminalAndEndsLogs() {
+        service.cancelTest();
+        verify(terminalProcess).cancelTest();
+        verify(logsService).end();
     }
 }
