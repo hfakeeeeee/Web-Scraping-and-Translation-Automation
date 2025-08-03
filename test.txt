@@ -1,29 +1,48 @@
 package com.humana.dhp.automation.test.agent.service.impl;
 
 import com.humana.dha.dhp.repomanagement.RepositoryManager;
+import com.humana.dha.dhp.repomanagement.exception.GitApiException;
 import com.humana.dhp.automation.test.agent.configs.DefaultConfig;
-import com.humana.dhp.automation.test.agent.enums.Status;
+import com.humana.dhp.automation.test.agent.enums.AuthenticationState;
+import com.humana.dhp.automation.test.agent.enums.EmulationState;
 import com.humana.dhp.automation.test.agent.enums.Language;
+import com.humana.dhp.automation.test.agent.enums.Status;
+import com.humana.dhp.automation.test.agent.exception.DhpAutomationTestException;
+import com.humana.dhp.automation.test.agent.model.dto.AuthenticationDTO;
+import com.humana.dhp.automation.test.agent.model.dto.CreateTestGeneratorDTO;
 import com.humana.dhp.automation.test.agent.model.dto.ExecuteCommandDTO;
+import com.humana.dhp.automation.test.agent.model.dto.EmulationDTO;
 import com.humana.dhp.automation.test.agent.model.dto.RunDetailDTO;
 import com.humana.dhp.automation.test.agent.model.dto.VersionControlDTO;
+import com.humana.dhp.automation.test.agent.model.dto.ConfigFileDTO;
 import com.humana.dhp.automation.test.agent.model.dto.update.UpdateRunDetailDTO;
+import com.humana.dhp.automation.test.agent.model.dto.update.UpdateEmulationProcessDTO;
+import com.humana.dhp.automation.test.agent.model.dto.update.UpdatePrepareAuthenticationDTO;
+import com.humana.dhp.automation.test.agent.model.dto.update.UpdateRunAuthenticationDTO;
 import com.humana.dhp.automation.test.agent.service.intf.CollectService;
 import com.humana.dhp.automation.test.agent.service.intf.LogsService;
 import com.humana.dhp.automation.test.agent.service.intf.TerminalProcess;
 import com.humana.dhp.automation.test.agent.service.intf.UpdateRequestService;
 import com.humana.dhp.automation.test.agent.strategy.platform.TestPlatformStrategy;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
+import com.humana.dhp.automation.test.agent.utils.CryptoUtil;
+import com.humana.dhp.automation.test.agent.utils.FileProcessUtils;
+import com.humana.dhp.automation.test.agent.utils.JsonUtil;
+import com.humana.dhp.automation.test.agent.utils.StringBuilderUtils;
+import org.eclipse.jgit.api.ResetCommand;
+import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.*;
+import org.mockito.MockedConstruction;
+import org.mockito.MockedStatic;
+import org.springframework.test.util.ReflectionTestUtils;
 import reactor.core.publisher.Flux;
 
-import java.io.File;
+import java.io.*;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.*;
 
 import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
@@ -40,18 +59,19 @@ class TestServiceImplTest {
 
     @BeforeEach
     void setup() {
-        when(defaultConfig.getHostName()).thenReturn("host-agent");
-        when(defaultConfig.getTestPlatformStrategy()).thenReturn(testPlatformStrategy);
+        // moved stubs into individual tests
     }
 
     @Test
     void runTest_normalTest_whenRunDetailIsNull_reportsFailure() {
-        when(updateRequestService.getRequest(eq("u1"), eq(RunDetailDTO.class))).thenReturn(null);
+        when(defaultConfig.getHostName()).thenReturn("host-agent");
+        when(defaultConfig.getTestPlatformStrategy()).thenReturn(testPlatformStrategy);
+        when(updateRequestService.getRequest("u1", RunDetailDTO.class)).thenReturn(null);
 
         service.runTest("normal_test/u1");
 
         ArgumentCaptor<UpdateRunDetailDTO> captor = ArgumentCaptor.forClass(UpdateRunDetailDTO.class);
-        verify(updateRequestService, times(1)).updateRequest(eq("u1"), captor.capture());
+        verify(updateRequestService).updateRequest(eq("u1"), captor.capture());
         UpdateRunDetailDTO dto = captor.getValue();
         assertEquals(Status.FAILED, dto.getStatus());
         assertTrue(dto.getErrorMessage().contains("Unable to get run detail"));
@@ -62,9 +82,11 @@ class TestServiceImplTest {
 
     @Test
     void runTest_normalTest_whenCanceled_doesNothingExceptCleanup() {
+        when(defaultConfig.getHostName()).thenReturn("host-agent");
+        when(defaultConfig.getTestPlatformStrategy()).thenReturn(testPlatformStrategy);
         RunDetailDTO rd = new RunDetailDTO();
         rd.setStatus(Status.CANCELED);
-        when(updateRequestService.getRequest(eq("u2"), eq(RunDetailDTO.class))).thenReturn(rd);
+        when(updateRequestService.getRequest("u2", RunDetailDTO.class)).thenReturn(rd);
 
         service.runTest("normal_test/u2");
 
@@ -76,12 +98,14 @@ class TestServiceImplTest {
 
     @Test
     void runTest_normalTest_successfulFlow_reportsInProgressAndFinal() {
+        when(defaultConfig.getHostName()).thenReturn("host-agent");
+        when(defaultConfig.getTestPlatformStrategy()).thenReturn(testPlatformStrategy);
         RunDetailDTO rd = new RunDetailDTO();
-        rd.setStatus(null);
         rd.setLanguage(Language.JAVA);
+        rd.setStatus(null);
         rd.setVariables(new HashMap<>());
         rd.setSetupCommand(null);
-        when(updateRequestService.getRequest(eq("u3"), eq(RunDetailDTO.class))).thenReturn(rd);
+        when(updateRequestService.getRequest("u3", RunDetailDTO.class)).thenReturn(rd);
         when(testPlatformStrategy.getWorkingDirectory(rd)).thenReturn(new File("."));
         when(testPlatformStrategy.buildRunTestCommand(rd)).thenReturn("run-cmd");
         ExecuteCommandDTO exec = mock(ExecuteCommandDTO.class);
@@ -107,12 +131,13 @@ class TestServiceImplTest {
 
     @Test
     void runTest_repoTest_whenVersionControlIsNull_reportsFailure() {
-        when(updateRequestService.getRequest(eq("u4"), eq(VersionControlDTO.class))).thenReturn(null);
+        when(defaultConfig.getTestPlatformStrategy()).thenReturn(testPlatformStrategy);
+        when(updateRequestService.getRequest("u4", VersionControlDTO.class)).thenReturn(null);
 
         service.runTest("repo_test/u4");
 
         ArgumentCaptor<UpdateRunDetailDTO> captor = ArgumentCaptor.forClass(UpdateRunDetailDTO.class);
-        verify(updateRequestService, times(1)).updateRequest(eq("u4"), captor.capture());
+        verify(updateRequestService).updateRequest(eq("u4"), captor.capture());
         assertEquals(Status.FAILED, captor.getValue().getStatus());
         verify(terminalProcess).cleanUpTest();
         verify(terminalProcess).closeProcess();
@@ -141,5 +166,152 @@ class TestServiceImplTest {
         service.cancelTest();
         verify(terminalProcess).cancelTest();
         verify(logsService).end();
+    }
+
+    @Test
+    void cloneRepository_success_and_failure() throws Exception {
+        try (MockedConstruction<ProcessBuilder> mc = mockConstruction(ProcessBuilder.class, (pb, ctx) -> {
+            when(pb.directory(any(File.class))).thenReturn(pb);
+            when(pb.command("git", "clone", "url")).thenReturn(pb);
+            when(pb.redirectErrorStream(true)).thenReturn(pb);
+            Process p = mock(Process.class);
+            when(p.getInputStream()).thenReturn(new ByteArrayInputStream("".getBytes()));
+            when(p.waitFor()).thenReturn(0);
+            when(pb.start()).thenReturn(p);
+        })) {
+            boolean ok = (boolean) ReflectionTestUtils.invokeMethod(service, "cloneRepository", "url");
+            assertTrue(ok);
+        }
+        try (MockedConstruction<ProcessBuilder> mc = mockConstruction(ProcessBuilder.class, (pb, ctx) -> {
+            when(pb.directory(any(File.class))).thenReturn(pb);
+            when(pb.command("git", "clone", "url")).thenReturn(pb);
+            when(pb.redirectErrorStream(true)).thenReturn(pb);
+            Process p = mock(Process.class);
+            when(p.getInputStream()).thenReturn(new ByteArrayInputStream("".getBytes()));
+            when(p.waitFor()).thenReturn(1);
+            when(pb.start()).thenReturn(p);
+        })) {
+            boolean ok = (boolean) ReflectionTestUtils.invokeMethod(service, "cloneRepository", "url");
+            assertFalse(ok);
+        }
+    }
+
+    @Test
+    void pushCodeToRepository_success_and_failure() throws Exception {
+        try (MockedConstruction<ProcessBuilder> mc = mockConstruction(ProcessBuilder.class, (pb, ctx) -> {
+            when(pb.directory(any(File.class))).thenReturn(pb);
+            when(pb.command("git", "push", "url")).thenReturn(pb);
+            when(pb.redirectErrorStream(true)).thenReturn(pb);
+            Process p = mock(Process.class);
+            when(p.getInputStream()).thenReturn(new ByteArrayInputStream("".getBytes()));
+            when(p.waitFor()).thenReturn(0);
+            when(pb.start()).thenReturn(p);
+        })) {
+            boolean ok = (boolean) ReflectionTestUtils.invokeMethod(service, "pushCodeToRepository", "url", "dir");
+            assertTrue(ok);
+        }
+        try (MockedConstruction<ProcessBuilder> mc = mockConstruction(ProcessBuilder.class, (pb, ctx) -> {
+            when(pb.directory(any(File.class))).thenReturn(pb);
+            when(pb.command("git", "push", "url")).thenReturn(pb);
+            when(pb.redirectErrorStream(true)).thenReturn(pb);
+            Process p = mock(Process.class);
+            when(p.getInputStream()).thenReturn(new ByteArrayInputStream("".getBytes()));
+            when(p.waitFor()).thenReturn(2);
+            when(pb.start()).thenReturn(p);
+        })) {
+            boolean ok = (boolean) ReflectionTestUtils.invokeMethod(service, "pushCodeToRepository", "url", "dir");
+            assertFalse(ok);
+        }
+    }
+
+    @Test
+    void deleteRepository_deletesDirectory() throws Exception {
+        File temp = Files.createTempDirectory("testrepo").toFile();
+        new File(temp, "a.txt").createNewFile();
+        assertTrue(temp.exists());
+        ReflectionTestUtils.invokeMethod(service, "deleteRepository", temp.getAbsolutePath());
+        assertFalse(temp.exists());
+    }
+
+    @Test
+    void handleRepositoryUrl_buildsCorrectUrl() {
+        RepositoryManager rm = mock(RepositoryManager.class);
+        when(rm.getUrl()).thenReturn("https://dev.azure.com/org/proj");
+        when(rm.getPat()).thenReturn("token");
+        String out = (String) ReflectionTestUtils.invokeMethod(service, "handleRepositoryUrl", rm);
+        assertTrue(out.startsWith("https://humana:token@dev.azure.com"));
+    }
+
+    @Test
+    void copyConfigFiles_success_and_failure() throws Exception {
+        String base = Files.createTempDirectory("cfg").toString();
+        VersionControlDTO vc = new VersionControlDTO();
+        ConfigFileDTO c = new ConfigFileDTO();
+        c.setDestination("");
+        c.setFileName("f.txt");
+        c.setFileContent(Base64.getEncoder().encodeToString("hello".getBytes()));
+        vc.setConfigFiles(List.of(c));
+        try (MockedStatic<CryptoUtil> cm = mockStatic(CryptoUtil.class)) {
+            cm.when(() -> CryptoUtil.decrypt(anyString())).thenReturn("decrypted");
+            ReflectionTestUtils.invokeMethod(service.getClass(), "copyConfigFiles", vc, base);
+            String content = Files.readString(new File(base, "f.txt").toPath());
+            assertEquals("decrypted", content);
+        }
+        VersionControlDTO vc2 = new VersionControlDTO();
+        ConfigFileDTO c2 = new ConfigFileDTO();
+        c2.setDestination("");
+        c2.setFileName("g.txt");
+        c2.setFileContent("bad!");
+        vc2.setConfigFiles(List.of(c2));
+        try (MockedStatic<CryptoUtil> cm = mockStatic(CryptoUtil.class)) {
+            cm.when(() -> CryptoUtil.decrypt(anyString())).thenThrow(new IOException("fail"));
+            assertThrows(DhpAutomationTestException.class,
+                () -> ReflectionTestUtils.invokeMethod(service.getClass(), "copyConfigFiles", vc2, base));
+        }
+    }
+
+    @Test
+    void getXPath_success_and_failure() {
+        when(defaultConfig.getTestPlatformStrategy()).thenReturn(testPlatformStrategy);
+        ExecuteCommandDTO exec = mock(ExecuteCommandDTO.class);
+        when(exec.getExitCode()).thenReturn(0);
+        when(exec.getErrorMessage()).thenReturn(null);
+        when(terminalProcess.executeTest(eq(Language.PYTHON), any(File.class), anyString(), anyMap()))
+            .thenReturn(exec);
+        byte[] data = "xyz".getBytes(StandardCharsets.UTF_8);
+        try (MockedStatic<FileProcessUtils> fm = mockStatic(FileProcessUtils.class)) {
+            fm.when(() -> FileProcessUtils.readFile(anyString())).thenReturn(data);
+            byte[] out = (byte[]) ReflectionTestUtils.invokeMethod(service, "getXPath", "u");
+            assertArrayEquals(data, out);
+        }
+        ExecuteCommandDTO exec2 = mock(ExecuteCommandDTO.class);
+        when(exec2.getExitCode()).thenReturn(1);
+        when(exec2.getErrorMessage()).thenReturn("err");
+        when(terminalProcess.executeTest(eq(Language.PYTHON), any(File.class), anyString(), anyMap()))
+            .thenReturn(exec2);
+        assertThrows(DhpAutomationTestException.class,
+            () -> ReflectionTestUtils.invokeMethod(service, "getXPath", "u"));
+    }
+
+    @Test
+    void handlePrepareAuthentication_success_and_failures() {
+        String url = "u";
+        when(defaultConfig.getHostName()).thenReturn("h");
+        when(defaultConfig.getTestPlatformStrategy()).thenReturn(testPlatformStrategy);
+        AuthenticationDTO dto = new AuthenticationDTO();
+        dto.setUrl("u1");
+        try (MockedStatic<FileProcessUtils> fm = mockStatic(FileProcessUtils.class);
+             MockedStatic(JsonUtil> jm = mockStatic(JsonUtil.class)) {
+            jm.when(() -> JsonUtil.fromJson(anyString(), eq(CreateTestGeneratorDTO.class)))
+              .thenReturn(null); // not used here
+        }
+        try (MockedStatic<FileProcessUtils> fpu = mockStatic(FileProcessUtils.class);
+             MockedStatic(JsonUtil> ju = mockStatic(JsonUtil.class)) {
+            UpdatePrepareAuthenticationDTO spawn = new UpdatePrepareAuthenticationDTO();
+            spawn.setState(AuthenticationState.PREPARE);
+            when(updateRequestService.updateRequest(eq(url + "/prepare"), any()))
+                .thenReturn(null);
+            when(JsonUtil.fromJson(anyString(), eq(AuthenticationDTO.class))).thenReturn(null);
+        }
     }
 }
